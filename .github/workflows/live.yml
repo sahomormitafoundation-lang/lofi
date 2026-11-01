@@ -1,68 +1,148 @@
+
 name: Continuous Study Stream
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
+
   schedule:
-    - cron: '0 0 * * *'
-    - cron: '0 3 * * *'
-    - cron: '0 6 * * *'
-    - cron: '0 9 * * *'
-    - cron: '0 12 * * *'
-    - cron: '0 15 * * *'
-    - cron: '0 18 * * *'
-    - cron: '0 21 * * *'
+    - cron: '5 0,3,6,9,12,15,18,21 * * *'
+
+# Do not cancel an active stream when another run starts.
+concurrency:
+  group: lo-fi-study-stream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   stream:
+    name: YouTube Lo-Fi Live Stream
     runs-on: ubuntu-latest
-    concurrency: 
-      group: lo-fi-study-stream
-      cancel-in-progress: true
-    permissions:
-      actions: write
-      contents: read
+    timeout-minutes: 179
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Auto-Clean Old Workflow Runs
-        run: |
-          runs=$(gh api -X GET /repos/${{ github.repository }}/actions/runs --jq '.workflow_runs[] | select(.status == "completed") | .id')
-          for run_id in $runs; do
-            gh api -X DELETE /repos/${{ github.repository }}/actions/runs/$run_id || true
-          done
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install FFmpeg & Fonts
+      - name: Install FFmpeg and Fonts
         run: |
-          sudo apt-get update || true
-          sudo apt-get install -y ffmpeg fonts-dejavu-core --fix-missing
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          ffmpeg -version
+          python --version
 
-      - name: Pick Assets
+      - name: Pick Random Assets
         id: pick
+        shell: bash
         run: |
-          ASSETS=$(python script.py)
-          echo "assets_path=$ASSETS" >> $GITHUB_OUTPUT
+          set -euo pipefail
 
-      - name: Start Continuous Stream
+          python script.py > assets.json
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          with open("assets.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          music = Path(data["music"]).resolve()
+          image = Path(data["image"]).resolve()
+          facts = data["facts"]
+
+          if not music.is_file():
+              raise FileNotFoundError(f"Music not found: {music}")
+
+          if not image.is_file():
+              raise FileNotFoundError(f"Image not found: {image}")
+
+          if len(facts) != 5:
+              raise ValueError("Exactly 5 quotes are required.")
+
+          quote_dir = Path("quotes")
+          quote_dir.mkdir(exist_ok=True)
+
+          for i, fact in enumerate(facts, start=1):
+              (quote_dir / f"quote{i}.txt").write_text(
+                  fact, encoding="utf-8"
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"music={music}\n")
+              output.write(f"image={image}\n")
+
+          print("Random assets loaded successfully.")
+          PY
+
+      - name: Validate YouTube Stream Key
+        shell: bash
+        env:
+          YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
         run: |
-          IFS='|' read -r MUSIC IMAGE T1 T2 T3 T4 T5 <<< "${{ steps.pick.outputs.assets_path }}"
-          
-          ffmpeg -re -loop 1 -i "$IMAGE" \
-          -stream_loop -1 -i "$MUSIC" \
-          -t 10740 \
-          -vf "zoompan=z='if(lte(mod(it,300),150),zoom+0.0005,zoom-0.0005)':d=1:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':s=1280x720, \
-          drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':text='$T1':enable='lt(mod(t,1500),300)':fontcolor=white@0.8:fontsize=32:x='w-(mod(t*50,w+600))':y='h-50':box=1:boxcolor=black@0.4:boxborderw=10, \
-          drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':text='$T2':enable='between(mod(t,1500),300,600)':fontcolor=white@0.8:fontsize=32:x='w-(mod(t*50,w+600))':y='h-50':box=1:boxcolor=black@0.4:boxborderw=10, \
-          drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':text='$T3':enable='between(mod(t,1500),600,900)':fontcolor=white@0.8:fontsize=32:x='w-(mod(t*50,w+600))':y='h-50':box=1:boxcolor=black@0.4:boxborderw=10, \
-          drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':text='$T4':enable='between(mod(t,1500),900,1200)':fontcolor=white@0.8:fontsize=32:x='w-(mod(t*50,w+600))':y='h-50':box=1:boxcolor=black@0.4:boxborderw=10, \
-          drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':text='$T5':enable='between(mod(t,1500),1200,1500)':fontcolor=white@0.8:fontsize=32:x='w-(mod(t*50,w+600))':y='h-50':box=1:boxcolor=black@0.4:boxborderw=10" \
-          -c:v libx264 -preset ultrafast -b:v 1800k -maxrate 2000k -bufsize 4000k \
-          -pix_fmt yuv420p -g 60 -c:a aac -b:a 128k -ar 44100 \
-          -f flv "rtmp://a.rtmp.youtube.com/live2/${{ secrets.YOUTUBE_STREAM_KEY }}?bandwidthtest=false"
+          if [ -z "$YOUTUBE_STREAM_KEY" ]; then
+            echo "ERROR: YOUTUBE_STREAM_KEY is missing."
+            exit 1
+          fi
+
+          echo "Stream key validated."
+
+      - name: Start YouTube Live Stream
+        shell: bash
+        env:
+          MUSIC: ${{ steps.pick.outputs.music }}
+          IMAGE: ${{ steps.pick.outputs.image }}
+          YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
+
+        run: |
+          set -euo pipefail
+
+          FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+          echo "Starting Continuous Study Stream..."
+
+          ffmpeg \
+            -hide_banner \
+            -loglevel warning \
+            -stats \
+            -re \
+            -loop 1 \
+            -framerate 30 \
+            -i "$IMAGE" \
+            -stream_loop -1 \
+            -re \
+            -i "$MUSIC" \
+            -t 10500 \
+            -vf "
+            zoompan=z='if(lte(mod(on,600),300),min(zoom+0.0005,1.10),max(zoom-0.0005,1.0))':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=30,
+            drawtext=fontfile='$FONT':textfile='quotes/quote1.txt':expansion=none:enable='lt(mod(t,1500),300)':fontcolor=white@0.85:fontsize=32:x='w-mod(t*45,w+text_w)':y='h-90':box=1:boxcolor=black@0.45:boxborderw=12,
+            drawtext=fontfile='$FONT':textfile='quotes/quote2.txt':expansion=none:enable='between(mod(t,1500),300,600)':fontcolor=white@0.85:fontsize=32:x='w-mod(t*45,w+text_w)':y='h-90':box=1:boxcolor=black@0.45:boxborderw=12,
+            drawtext=fontfile='$FONT':textfile='quotes/quote3.txt':expansion=none:enable='between(mod(t,1500),600,900)':fontcolor=white@0.85:fontsize=32:x='w-mod(t*45,w+text_w)':y='h-90':box=1:boxcolor=black@0.45:boxborderw=12,
+            drawtext=fontfile='$FONT':textfile='quotes/quote4.txt':expansion=none:enable='between(mod(t,1500),900,1200)':fontcolor=white@0.85:fontsize=32:x='w-mod(t*45,w+text_w)':y='h-90':box=1:boxcolor=black@0.45:boxborderw=12,
+            drawtext=fontfile='$FONT':textfile='quotes/quote5.txt':expansion=none:enable='between(mod(t,1500),1200,1500)':fontcolor=white@0.85:fontsize=32:x='w-mod(t*45,w+text_w)':y='h-90':box=1:boxcolor=black@0.45:boxborderw=12
+            " \
+            -c:v libx264 \
+            -preset ultrafast \
+            -b:v 1800k \
+            -maxrate 2000k \
+            -bufsize 4000k \
+            -pix_fmt yuv420p \
+            -r 30 \
+            -g 60 \
+            -keyint_min 60 \
+            -sc_threshold 0 \
+            -c:a aac \
+            -b:a 128k \
+            -ar 44100 \
+            -ac 2 \
+            -af "aresample=async=1:first_pts=0" \
+            -f flv \
+            "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+
+          echo "Stream session completed."
